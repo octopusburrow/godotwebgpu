@@ -1694,8 +1694,49 @@ RDD::TextureID RenderingDeviceDriverWebGPU::texture_create(const TextureFormat &
 }
 
 RDD::TextureID RenderingDeviceDriverWebGPU::texture_create_from_extension(uint64_t p_native_texture, TextureType p_type, DataFormat p_format, uint32_t p_array_layers, bool p_depth_stencil, uint32_t p_mipmaps) {
-	// Not supported on web platform.
-	ERR_FAIL_V_MSG(TextureID(), "WebGPU: texture_create_from_extension not supported.");
+	// Wrap an externally-owned WGPUTexture (e.g. a WebXR projection-layer
+	// texture imported from JS via WebGPU.importJsTexture). We take our own
+	// reference so texture_free's unconditional release stays symmetric; the
+	// compositor keeps its own reference to the underlying resource.
+	WGPUTexture ext = (WGPUTexture)(uintptr_t)p_native_texture;
+	ERR_FAIL_NULL_V_MSG(ext, TextureID(), "WebGPU: null external texture handle.");
+	wgpuTextureAddRef(ext);
+
+	WGTexture *tex = new WGTexture();
+	tex->handle = ext;
+	tex->view_source = ext;
+	// Trust the actual texture over the caller's declared format: XR layers
+	// are allocated with the binding's preferred format (often BGRA8), which
+	// the caller cannot know.
+	tex->format = wgpuTextureGetFormat(ext);
+	tex->rd_format = p_format;
+	tex->width = wgpuTextureGetWidth(ext);
+	tex->height = wgpuTextureGetHeight(ext);
+	tex->depth = 1;
+	tex->mipmaps = MAX(1u, p_mipmaps);
+	tex->layers = MAX(1u, p_array_layers);
+	tex->sample_count = 1;
+	tex->dimension = WGPUTextureDimension_2D;
+	tex->view_dimension = (tex->layers > 1) ? WGPUTextureViewDimension_2DArray : WGPUTextureViewDimension_2D;
+	tex->usage = wgpuTextureGetUsage(ext);
+
+	WGPUTextureViewDescriptor view_desc = {};
+	view_desc.format = tex->format;
+	view_desc.dimension = tex->view_dimension;
+	view_desc.baseMipLevel = 0;
+	view_desc.mipLevelCount = tex->mipmaps;
+	view_desc.baseArrayLayer = 0;
+	view_desc.arrayLayerCount = tex->layers;
+	view_desc.aspect = p_depth_stencil ? WGPUTextureAspect_DepthOnly : WGPUTextureAspect_All;
+
+	tex->default_view = wgpuTextureCreateView(ext, &view_desc);
+	if (tex->default_view == nullptr) {
+		wgpuTextureRelease(ext);
+		delete tex;
+		ERR_FAIL_V_MSG(TextureID(), "WebGPU: failed to create view on external texture.");
+	}
+
+	return TextureID(tex);
 }
 
 // Returns true if the format is an sRGB variant.
