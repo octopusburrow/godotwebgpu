@@ -2257,7 +2257,12 @@ void Validator::CheckType(const core::type::Type* root,
 
                     cur_offset += (member->Offset() - cur_offset) + member->MinimumRequiredSize();
                 }
-                if (str->Size() < cur_offset) {
+                // GODOT PATCH (extends spec-constant size-mismatch relaxation): the
+                // total-size check must honor the same capability as the member-size
+                // check above — spec-constant-sized arrays leave the struct's Size()
+                // decoration at its unfolded value.
+                if (!capabilities_.Contains(Capability::kAllowStructMemberSizeMismatch) &&
+                    str->Size() < cur_offset) {
                     diag() << "struct size (" << str->Size()
                            << ") is smaller than the end of the last member (" << cur_offset << ")";
                     return false;
