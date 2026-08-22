@@ -281,7 +281,23 @@ uint32_t WebXRInterfaceJS::get_capabilities() const {
 }
 
 uint32_t WebXRInterfaceJS::get_view_count() {
-	return godot_webxr_get_view_count();
+	uint32_t view_count = godot_webxr_get_view_count();
+
+	// Godot's RenderingDevice renderer implements stereo exclusively via
+	// multiview (rendering_device.cpp:2804 hard-fails a multi-view render pass
+	// without driver support), and WebGPU exposes no multiview extension. Until
+	// a non-multiview stereo path exists in the RD renderer, clamp to a single
+	// view: the session is head-tracked and correctly posed, but monoscopic.
+	// Without multiview each eye is drawn as its own single-view pass (see
+	// needs_per_view_passes), so the engine builds single-view framebuffers
+	// against one array layer at a time. The projection layer itself stays a
+	// texture array — the compositor requires both views each frame.
+	RenderingDevice *rd = RenderingServer::get_singleton()->get_rendering_device();
+	if (view_count > 1 && rd != nullptr && !rd->has_feature(RenderingDevice::SUPPORTS_MULTIVIEW)) {
+		return 1;
+	}
+
+	return view_count;
 }
 
 bool WebXRInterfaceJS::is_initialized() const {
@@ -332,6 +348,9 @@ bool WebXRInterfaceJS::initialize() {
 
 		initialized = true;
 
+		// Tell the JS side up front whether the engine can do multiview, so the
+		// projection layer is created with a matching textureType. This must
+		// happen before the layer exists — by the first frame it is too late.
 		godot_webxr_initialize(
 				session_mode.utf8().get_data(),
 				required_features.utf8().get_data(),
@@ -472,6 +491,12 @@ Transform3D WebXRInterfaceJS::get_transform_for_view(uint32_t p_view, const Tran
 	ERR_FAIL_NULL_V(xr_server, p_cam_transform);
 	ERR_FAIL_COND_V(!initialized, p_cam_transform);
 
+	// With per-view passes the engine renders one view at a time and always asks
+	// for view 0; map that onto the eye currently being drawn.
+	if (needs_per_view_passes()) {
+		p_view = current_view;
+	}
+
 	float js_matrix[16];
 	bool has_transform = godot_webxr_get_transform_for_view(p_view, js_matrix);
 	if (!has_transform) {
@@ -490,6 +515,10 @@ Projection WebXRInterfaceJS::get_projection_for_view(uint32_t p_view, double p_a
 	Projection view;
 
 	ERR_FAIL_COND_V(!initialized, view);
+
+	if (needs_per_view_passes()) {
+		p_view = current_view;
+	}
 
 	float js_matrix[16];
 	bool has_projection = godot_webxr_get_projection_for_view(p_view, js_matrix);
@@ -595,13 +624,25 @@ RID WebXRInterfaceJS::_get_texture(unsigned int p_texture_id) {
 	uint32_t view_count = godot_webxr_get_view_count();
 	Size2 texture_size = get_render_target_size();
 
+	// The framebuffer's view_count must equal the wrapped texture's array layer
+	// count (rendering_device.cpp:3272). Trust the compositor's texture rather
+	// than the view count, which falls back to 1 before the first pose arrives
+	// and would silently produce an unusable single-layer framebuffer.
+	uint32_t texture_layers = (uint32_t)godot_webxr_get_texture_layers();
+	if (texture_layers == 0) {
+		texture_layers = view_count;
+	}
+	if (texture_layers != view_count) {
+		WARN_PRINT_ONCE(vformat("WebXR: layer texture has %d layers but %d views reported; using %d.", texture_layers, view_count, texture_layers));
+	}
+
 	RenderingDevice *rd = RenderingServer::get_singleton()->get_rendering_device();
 	if (rd != nullptr) {
 		// WebGPU path: p_texture_id is a WGPUTexture pointer imported from JS
 		// (WebGPU.importJsTexture). The driver wraps it without taking
 		// ownership of the underlying XR-compositor resource.
 		RID texture = rd->texture_create_from_extension(
-				view_count == 1 ? RenderingDevice::TEXTURE_TYPE_2D : RenderingDevice::TEXTURE_TYPE_2D_ARRAY,
+				texture_layers == 1 ? RenderingDevice::TEXTURE_TYPE_2D : RenderingDevice::TEXTURE_TYPE_2D_ARRAY,
 				RenderingDevice::DATA_FORMAT_B8G8R8A8_UNORM,
 				RenderingDevice::TEXTURE_SAMPLES_1,
 				RenderingDevice::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT,
@@ -609,7 +650,7 @@ RID WebXRInterfaceJS::_get_texture(unsigned int p_texture_id) {
 				(uint64_t)texture_size.width,
 				(uint64_t)texture_size.height,
 				1,
-				view_count,
+				texture_layers,
 				1);
 		texture_cache.insert(p_texture_id, texture);
 		return texture;
@@ -636,6 +677,71 @@ RID WebXRInterfaceJS::_get_texture(unsigned int p_texture_id) {
 #else
 	return RID();
 #endif // GLES3_ENABLED
+}
+
+bool WebXRInterfaceJS::needs_per_view_passes() const {
+	RenderingDevice *rd = RenderingServer::get_singleton()->get_rendering_device();
+	if (rd == nullptr || !initialized) {
+		return false;
+	}
+	// Only when the driver cannot do multiview but the device is stereo.
+	return !rd->has_feature(RenderingDevice::SUPPORTS_MULTIVIEW) && godot_webxr_get_view_count() > 1;
+}
+
+uint32_t WebXRInterfaceJS::get_per_view_pass_count() const {
+	return needs_per_view_passes() ? (uint32_t)godot_webxr_get_view_count() : 1;
+}
+
+void WebXRInterfaceJS::set_current_view(uint32_t p_view) {
+	current_view = p_view;
+}
+
+RID WebXRInterfaceJS::get_color_texture_for_view(uint32_t p_view) {
+	RenderingDevice *rd = RenderingServer::get_singleton()->get_rendering_device();
+	ERR_FAIL_NULL_V(rd, RID());
+	ERR_FAIL_UNSIGNED_INDEX_V(p_view, 2, RID());
+
+	// XR textures are "opaque": the compositor may invalidate the underlying
+	// resource at frame end even when the JS object identity is unchanged, so a
+	// cached slice can reference an already-invalid texture. Drop the wrapper and
+	// its slices every frame and re-import.
+	if (texture_cache.size() > 0) {
+		RenderingDevice *cache_rd = rd;
+		for (const KeyValue<unsigned int, RID> &E : texture_cache) {
+			if (E.value.is_valid()) {
+				cache_rd->free(E.value);
+			}
+		}
+		texture_cache.clear();
+	}
+
+	RID source = _get_color_texture();
+	if (source.is_null()) {
+		return RID();
+	}
+
+	// The compositor rotates its texture; rebuild the slices when it changes.
+	if (true || source != view_slice_source) {
+		for (uint32_t i = 0; i < 2; i++) {
+			if (view_slice_cache[i].is_valid()) {
+				rd->free(view_slice_cache[i]);
+				view_slice_cache[i] = RID();
+			}
+		}
+		view_slice_source = source;
+	}
+
+	if (view_slice_cache[p_view].is_null()) {
+		// A renderable WebGPU view must cover exactly one array layer.
+		view_slice_cache[p_view] = rd->texture_create_shared_from_slice(RenderingDevice::TextureView(), source, p_view, 0, 1, RenderingDevice::TEXTURE_SLICE_2D);
+	}
+
+	return view_slice_cache[p_view];
+}
+
+RID WebXRInterfaceJS::get_depth_texture_for_view(uint32_t p_view) {
+	// v0: no depth submitted to the projection layer.
+	return RID();
 }
 
 RID WebXRInterfaceJS::get_color_texture() {
