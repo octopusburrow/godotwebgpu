@@ -705,11 +705,24 @@ RID WebXRInterfaceJS::get_color_texture_for_view(uint32_t p_view) {
 	// resource at frame end even when the JS object identity is unchanged, so a
 	// cached slice can reference an already-invalid texture. Drop the wrapper and
 	// its slices every frame and re-import.
+	//
+	// ORDER MATTERS: the entries in view_slice_cache are shared views created from
+	// a parent in texture_cache (texture_create_shared_from_slice). Freeing the
+	// parent first leaves the slices dangling, and freeing them afterwards hits
+	// RenderingDevice::free_internal's final else -> "Attempted to free invalid ID".
+	// Always release slices before their parent.
+	for (uint32_t i = 0; i < 2; i++) {
+		if (view_slice_cache[i].is_valid()) {
+			rd->free(view_slice_cache[i]);
+			view_slice_cache[i] = RID();
+		}
+	}
+	view_slice_source = RID();
+
 	if (texture_cache.size() > 0) {
-		RenderingDevice *cache_rd = rd;
 		for (const KeyValue<unsigned int, RID> &E : texture_cache) {
 			if (E.value.is_valid()) {
-				cache_rd->free(E.value);
+				rd->free(E.value);
 			}
 		}
 		texture_cache.clear();
@@ -719,17 +732,7 @@ RID WebXRInterfaceJS::get_color_texture_for_view(uint32_t p_view) {
 	if (source.is_null()) {
 		return RID();
 	}
-
-	// The compositor rotates its texture; rebuild the slices when it changes.
-	if (true || source != view_slice_source) {
-		for (uint32_t i = 0; i < 2; i++) {
-			if (view_slice_cache[i].is_valid()) {
-				rd->free(view_slice_cache[i]);
-				view_slice_cache[i] = RID();
-			}
-		}
-		view_slice_source = source;
-	}
+	view_slice_source = source;
 
 	if (view_slice_cache[p_view].is_null()) {
 		// A renderable WebGPU view must cover exactly one array layer.
