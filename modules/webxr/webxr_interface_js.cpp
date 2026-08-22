@@ -546,6 +546,16 @@ bool WebXRInterfaceJS::pre_draw_viewport(RID p_render_target) {
 		// RenderingDevice (WebGPU) path: the generic viewport override
 		// (renderer_viewport.cpp) consumes get_color_texture() each frame;
 		// no FBO reattach machinery is needed.
+		//
+		// XR textures are "opaque": the compositor may swap the underlying
+		// resource each frame even when the JS object identity is unchanged, so
+		// the imported wrapper and its per-view slices must be rebuilt per frame.
+		// This MUST happen once per FRAME, not once per view -- with two-pass
+		// stereo, get_color_texture_for_view() is called once per eye, and
+		// tearing down there destroys the slice the previous eye is still
+		// rendering into ("Attempted to free invalid ID", every frame).
+		// Slices are shared views of the parent, so they are released first.
+		_release_view_slices();
 		color_texture = _get_color_texture();
 		depth_texture = _get_depth_texture();
 		return true;
@@ -696,39 +706,41 @@ void WebXRInterfaceJS::set_current_view(uint32_t p_view) {
 	current_view = p_view;
 }
 
-RID WebXRInterfaceJS::get_color_texture_for_view(uint32_t p_view) {
+void WebXRInterfaceJS::_release_view_slices() {
 	RenderingDevice *rd = RenderingServer::get_singleton()->get_rendering_device();
-	ERR_FAIL_NULL_V(rd, RID());
-	ERR_FAIL_UNSIGNED_INDEX_V(p_view, 2, RID());
-
-	// XR textures are "opaque": the compositor may invalidate the underlying
-	// resource at frame end even when the JS object identity is unchanged, so a
-	// cached slice can reference an already-invalid texture. Drop the wrapper and
-	// its slices every frame and re-import.
-	//
-	// ORDER MATTERS: the entries in view_slice_cache are shared views created from
-	// a parent in texture_cache (texture_create_shared_from_slice). Freeing the
-	// parent first leaves the slices dangling, and freeing them afterwards hits
-	// RenderingDevice::free_internal's final else -> "Attempted to free invalid ID".
-	// Always release slices before their parent.
+	if (rd == nullptr) {
+		return;
+	}
+	// Slices are shared views created from a parent in texture_cache; releasing
+	// the parent first would leave them dangling and their free would land in
+	// RenderingDevice::_free_internal's final else.
 	for (uint32_t i = 0; i < 2; i++) {
 		if (view_slice_cache[i].is_valid()) {
-			rd->free(view_slice_cache[i]);
+			rd->free_rid(view_slice_cache[i]);
 			view_slice_cache[i] = RID();
 		}
 	}
 	view_slice_source = RID();
 
-	if (texture_cache.size() > 0) {
-		for (const KeyValue<unsigned int, RID> &E : texture_cache) {
-			if (E.value.is_valid()) {
-				rd->free(E.value);
-			}
+	for (const KeyValue<unsigned int, RID> &E : texture_cache) {
+		if (E.value.is_valid()) {
+			rd->free_rid(E.value);
 		}
-		texture_cache.clear();
 	}
+	texture_cache.clear();
+	color_texture = RID();
+	depth_texture = RID();
+}
 
-	RID source = _get_color_texture();
+RID WebXRInterfaceJS::get_color_texture_for_view(uint32_t p_view) {
+	RenderingDevice *rd = RenderingServer::get_singleton()->get_rendering_device();
+	ERR_FAIL_NULL_V(rd, RID());
+	ERR_FAIL_UNSIGNED_INDEX_V(p_view, 2, RID());
+
+	// Pure accessor: the per-frame teardown lives in pre_draw_viewport(), so
+	// both eyes of a frame share one imported parent and keep their slices
+	// alive for the whole frame.
+	RID source = color_texture.is_valid() ? color_texture : _get_color_texture();
 	if (source.is_null()) {
 		return RID();
 	}

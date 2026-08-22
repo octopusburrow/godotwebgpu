@@ -87,6 +87,7 @@ private:
 	RID color_texture;
 	RID depth_texture;
 
+	void _release_view_slices();
 	RID _get_color_texture();
 	RID _get_depth_texture();
 	RID _get_texture(unsigned int p_texture_id);
