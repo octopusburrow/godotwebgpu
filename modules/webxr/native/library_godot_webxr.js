@@ -101,6 +101,27 @@ const GodotWebXR = {
 			// An immersive-vr session is stereo by definition, so assume 2 until a
 			// pose proves otherwise. (Measured: the 1->2 rebuild happened on every
 			// session start.)
+			// UPSTREAM NOTE — this fallback is NOT ours. Godot's WebXR glue has long
+			// used `(pose) ? pose.views.length : 1`, i.e. assume ONE view until a pose
+			// proves otherwise. On the WebGL path that is free: if the guess is wrong
+			// the layer is simply rebuilt on the first stereo pose, and GL layer
+			// allocation is cheap. It is also correct for `inline` and for monocular
+			// `immersive-ar`, and it matches this module's own `view_count: 1` default,
+			// so it reads as deliberate defensive coding for a genuinely unknown state
+			// rather than an oversight.
+			//
+			// It only becomes expensive on WebGPU, where the rebuild means allocating a
+			// swapchain, tearing it down, and allocating a texture-array swapchain —
+			// measured at ~10s of session startup. So we change it ONLY on the WebGPU
+			// path and leave the WebGL behaviour exactly as upstream wrote it.
+			//
+			// We SUSPECT the fallback could be removed for cleanliness on both paths,
+			// since an immersive-vr session is stereo from the start. We have NOT tried
+			// it: WebGL shows no symptom, the code is upstream (and appears inherited
+			// from Godot proper rather than authored in this fork), and it may guard
+			// cases we have not enumerated. If it is not breaking anything, our
+			// inclination is to leave it alone.
+
 			// A/B SWITCH (2026-08-23, for the PR's causal claim): ?legacy_layer=1
 			// restores the pre-fix behaviour — fall back to 1 view when no pose
 			// exists yet, which forces the 1->2 destroy/rebuild on the first
