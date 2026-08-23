@@ -2261,6 +2261,27 @@ void Validator::CheckType(const core::type::Type* root,
                 // total-size check must honor the same capability as the member-size
                 // check above — spec-constant-sized arrays leave the struct's Size()
                 // decoration at its unfolded value.
+                //
+                // NECESSITY: EMPIRICALLY CONFIRMED for WebGPU, 2026-08-23. A build was
+                // shipped by accident with this patch reverted (an aborted no-patch build
+                // left a stale validator object that got linked in). Result: BLACK SCREEN
+                // — shader validation failed and nothing drew, on a scene using
+                // rendering_method=gl_compatibility with one light and StandardMaterial3D.
+                // So this is not only a Mobile-renderer concern: gl_compatibility on the
+                // WebGPU backend still routes shaders through Tint, and without this the
+                // WebGPU path does not render at all.
+                //
+                // Whether it is also required on other paths is UNTESTED. And this may be
+                // the WRONG LAYER: the alternative is fixing Godot's shader generation so
+                // it stops emitting a struct whose declared size disagrees with its
+                // members, which would touch no vendored code. Not investigated.
+                //
+                // CAUTION on the reasoning: the member-size check this mirrors sits inside
+                // `if (!member->RowMajor())` carrying `TODO(448608979): Remove guard once
+                // updated to handle RowMajor correctly` — i.e. that capability lives in a
+                // known-temporary workaround with an upstream tracking number, not a stable
+                // design principle. This patch works and is required; the argument that it
+                // is *correct* is weaker than the evidence that it is *necessary*.
                 if (!capabilities_.Contains(Capability::kAllowStructMemberSizeMismatch) &&
                     str->Size() < cur_offset) {
                     diag() << "struct size (" << str->Size()
