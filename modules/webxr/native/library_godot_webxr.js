@@ -101,8 +101,23 @@ const GodotWebXR = {
 			// An immersive-vr session is stereo by definition, so assume 2 until a
 			// pose proves otherwise. (Measured: the 1->2 rebuild happened on every
 			// session start.)
+			// A/B SWITCH (2026-08-23, for the PR's causal claim): ?legacy_layer=1
+			// restores the pre-fix behaviour — fall back to 1 view when no pose
+			// exists yet, which forces the 1->2 destroy/rebuild on the first
+			// stereo pose. Rendering is IDENTICAL either way; only the number of
+			// layer creations differs. This is the whole delta under test.
 			let raw_view_count = 2;
-			if (GodotWebXR.pose) {
+			if (GodotWebXR._legacy_layer === undefined) {
+				GodotWebXR._legacy_layer =
+					new URLSearchParams(location.search).get('legacy_layer') === '1';
+				if (GodotWebXR._legacy_layer) {
+					console.warn('[webxr][A/B] legacy_layer=1 — using the PRE-FIX path '
+						+ '(mono layer at setup, rebuilt to texture-array on first pose).');
+				}
+			}
+			if (GodotWebXR._legacy_layer && !GodotWebXR.pose) {
+				raw_view_count = 1;                       // the old bug, on purpose
+			} else if (GodotWebXR.pose) {
 				raw_view_count = GodotWebXR.pose.views.length;
 			} else if (GodotWebXR.session && GodotWebXR.session.mode === 'inline') {
 				raw_view_count = 1;
@@ -136,6 +151,14 @@ const GodotWebXR = {
 			if (layer && GodotWebXR.view_count === new_view_count) {
 				return layer;
 			}
+
+			// Timestamped layer-creation trace: this is the measurement the A/B
+			// exists to produce. t = ms since session setup began.
+			GodotWebXR._t0 = GodotWebXR._t0 || performance.now();
+			GodotWebXR._layer_n = (GodotWebXR._layer_n || 0) + 1;
+			console.log('[webxr][A/B] creating projection layer #' + GodotWebXR._layer_n
+				+ ' views=' + new_view_count
+				+ ' t=+' + (performance.now() - GodotWebXR._t0).toFixed(0) + 'ms');
 
 			if (GodotWebXR.gpu_binding) {
 				// WebGPU projection layer. Note: no depthStencilFormat — a layer
