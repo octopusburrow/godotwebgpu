@@ -115,8 +115,21 @@ const GodotWebXR = {
 				mono = !GodotWebXR.engine_supports_multiview;
 			}
 			const new_view_count = mono ? 1 : raw_view_count;
-			console.log('[xr-mono] getLayer: mono=' + mono + ' force_mono=' + GodotWebXR.force_mono + ' raw=' + raw_view_count + ' -> ' + new_view_count);
 			let layer = GodotWebXR.layer;
+
+			// 2026-08-23: creating the projection layer a SECOND time (destroy +
+			// re-create with a different view count) cost ~10s of session startup —
+			// Chrome allocates a swapchain, tears it down, allocates another. It also
+			// swaps the layer out from under the compositor mid-session, which the
+			// WebXR-WebGPU spec does not define. Measured cold-cache: ~10s -> instant.
+			// Silent when healthy; shouts once if the double-create ever comes back.
+			if (layer && GodotWebXR.view_count !== new_view_count && !GodotWebXR._warned_relayer) {
+				GodotWebXR._warned_relayer = true;
+				console.warn('[webxr] REBUILDING the projection layer mid-session ('
+					+ GodotWebXR.view_count + ' -> ' + new_view_count + ' views). This is the '
+					+ '~10s startup stall and is undefined per spec. An immersive-vr session '
+					+ 'is stereo from the start; the layer should be built once.');
+			}
 
 			// If the view count hasn't changed since creating this layer, then
 			// we can simply return it.
@@ -181,7 +194,6 @@ const GodotWebXR = {
 						const vp = si.viewport;
 						return `view${i}: vp=${vp.x},${vp.y} ${vp.width}x${vp.height} imageIndex=${si.imageIndex} tex=${si.colorTexture.width}x${si.colorTexture.height}x${si.colorTexture.depthOrArrayLayers}`;
 					}).join(' | ');
-					console.log('[xr-layout] views=' + views.length + ' ' + desc);
 				}
 				return sub;
 			}
@@ -511,7 +523,6 @@ const GodotWebXR = {
 	godot_webxr_set_force_mono__sig: 'vi',
 	godot_webxr_set_force_mono: function (p_force) {
 		const force = !!p_force;
-		console.log('[xr-mono] set_force_mono(' + force + ') called; layer=' + (GodotWebXR.layer ? 'EXISTS' : 'null'));
 		if (GodotWebXR.force_mono !== force) {
 			GodotWebXR.force_mono = force;
 			// Drop the cached layer so it is recreated with the right textureType.
