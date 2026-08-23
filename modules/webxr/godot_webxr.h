@@ -65,6 +65,9 @@ extern void godot_webxr_uninitialize();
 
 extern int godot_webxr_get_view_count();
 extern bool godot_webxr_get_render_target_size(int *r_size);
+extern bool godot_webxr_get_view_viewport(int p_view, int *r_rect);
+extern int godot_webxr_get_texture_layers();
+extern void godot_webxr_set_force_mono(int p_force);
 extern bool godot_webxr_get_transform_for_view(int p_view, float *r_transform);
 extern bool godot_webxr_get_projection_for_view(int p_view, float *r_transform);
 extern unsigned int godot_webxr_get_color_texture();
