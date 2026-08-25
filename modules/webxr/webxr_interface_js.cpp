@@ -36,7 +36,9 @@
 
 #include "core/input/input.h"
 #include "core/os/os.h"
+#ifdef GLES3_ENABLED
 #include "drivers/gles3/storage/texture_storage.h"
+#endif
 #include "scene/main/scene_tree.h"
 #include "scene/main/window.h"
 #include "scene/scene_string_names.h"
@@ -295,10 +297,12 @@ bool WebXRInterfaceJS::initialize() {
 			return false;
 		}
 
+#ifdef GLES3_ENABLED
 		if (session_mode == "immersive-vr" && !GLES3::Config::get_singleton()->multiview_supported) {
 			emit_signal("session_failed", "Stereo rendering in Godot requires multiview, but this web browser doesn't support it.");
 			return false;
 		}
+#endif // GLES3_ENABLED
 
 		if (requested_reference_space_types.is_empty()) {
 			emit_signal("session_failed", "No reference spaces were requested.");
@@ -368,6 +372,7 @@ void WebXRInterfaceJS::uninitialize() {
 
 		godot_webxr_uninitialize();
 
+#ifdef GLES3_ENABLED
 		GLES3::TextureStorage *texture_storage = GLES3::TextureStorage::get_singleton();
 		if (texture_storage != nullptr) {
 			for (KeyValue<unsigned int, RID> &E : texture_cache) {
@@ -378,6 +383,7 @@ void WebXRInterfaceJS::uninitialize() {
 				texture_storage->texture_free(E.value);
 			}
 		}
+#endif // GLES3_ENABLED
 
 		texture_cache.clear();
 		reference_space_type.clear();
@@ -499,6 +505,7 @@ Projection WebXRInterfaceJS::get_projection_for_view(uint32_t p_view, double p_a
 }
 
 bool WebXRInterfaceJS::pre_draw_viewport(RID p_render_target) {
+#ifdef GLES3_ENABLED
 	GLES3::TextureStorage *texture_storage = GLES3::TextureStorage::get_singleton();
 	if (texture_storage == nullptr) {
 		return false;
@@ -521,17 +528,22 @@ bool WebXRInterfaceJS::pre_draw_viewport(RID p_render_target) {
 	texture_storage->render_target_set_reattach_textures(p_render_target, true);
 
 	return true;
+#else
+	return false;
+#endif // GLES3_ENABLED
 }
 
 Vector<BlitToScreen> WebXRInterfaceJS::post_draw_viewport(RID p_render_target, const Rect2 &p_screen_rect) {
 	Vector<BlitToScreen> blit_to_screen;
 
+#ifdef GLES3_ENABLED
 	GLES3::TextureStorage *texture_storage = GLES3::TextureStorage::get_singleton();
 	if (texture_storage == nullptr) {
 		return blit_to_screen;
 	}
 
 	texture_storage->render_target_set_reattach_textures(p_render_target, false);
+#endif // GLES3_ENABLED
 
 	return blit_to_screen;
 }
@@ -560,6 +572,7 @@ RID WebXRInterfaceJS::_get_texture(unsigned int p_texture_id) {
 		return cache->get();
 	}
 
+#ifdef GLES3_ENABLED
 	GLES3::TextureStorage *texture_storage = GLES3::TextureStorage::get_singleton();
 	if (texture_storage == nullptr) {
 		return RID();
@@ -580,6 +593,9 @@ RID WebXRInterfaceJS::_get_texture(unsigned int p_texture_id) {
 	texture_cache.insert(p_texture_id, texture);
 
 	return texture;
+#else
+	return RID();
+#endif // GLES3_ENABLED
 }
 
 RID WebXRInterfaceJS::get_color_texture() {
