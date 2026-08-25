@@ -2858,6 +2858,10 @@ Error RenderingDeviceDriverWebGPU::command_queue_execute_and_present(CommandQueu
 			fence->work_done_pending = true;
 			WGPUQueueWorkDoneCallbackInfo cb = {};
 			cb.mode = WGPUCallbackMode_AllowSpontaneous;
+			// Overload set (see definitions near the top of this file): the
+			// port's WGPUQueueWorkDoneCallback typedef selects the matching
+			// signature. A "no matching conversion" error here means a new
+			// emdawnwebgpu changed the callback shape again.
 			cb.callback = _fence_work_done_callback;
 			cb.userdata1 = fence;
 			cb.userdata2 = nullptr;
@@ -8137,7 +8141,8 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 				mask &= ~WGPUColorWriteMask_Alpha;
 				static int _alpha_strip_log = 0;
 				if (_alpha_strip_log < 10) {
-					[[maybe_unused]] const char *sname = (p_shader.id) ? ((WGShader *)(p_shader.id))->name.utf8().get_data() : "?";
+					[[maybe_unused]] CharString sname_cs = (p_shader.id) ? ((WGShader *)(p_shader.id))->name.utf8() : CharString("?");
+					[[maybe_unused]] const char *sname = sname_cs.get_data();
 					WEBGPU_DIAG({ console.log('[ALPHA-STRIP] Pipeline #' + $0 + ' fmt=BGRA8Unorm mask=' + $1 + ' blend=' + $2 + ' shader=' + UTF8ToString($3)); },
 							_alpha_strip_log, (int)mask, ba.enable_blend ? 1 : 0, sname);
 					_alpha_strip_log++;
@@ -8152,7 +8157,8 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 				if (!float32_blendable_supported && _is_float32_format(fmt)) {
 					static int _f32_blend_skip_log = 0;
 					if (_f32_blend_skip_log < 10) {
-						[[maybe_unused]] const char *sname = (p_shader.id) ? ((WGShader *)(p_shader.id))->name.utf8().get_data() : "?";
+						[[maybe_unused]] CharString sname_cs2 = (p_shader.id) ? ((WGShader *)(p_shader.id))->name.utf8() : CharString("?");
+						[[maybe_unused]] const char *sname = sname_cs2.get_data();
 						WEBGPU_DIAG({ console.log('[FLOAT32-BLEND-SKIP] Pipeline fmt=' + $0 + ' shader=' + UTF8ToString($1) + ' — device lacks float32-blendable, disabling blend'); },
 								(int)fmt, sname);
 						_f32_blend_skip_log++;
