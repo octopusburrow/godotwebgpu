@@ -45,6 +45,7 @@ const GodotWebXR = {
 		pose: null,
 		view_count: 1,
 		session_mode: '',
+		warned_relayer: false,
 		input_sources: new Array(16),
 		touches: new Array(5),
 		onsimpleevent: null,
@@ -118,12 +119,22 @@ const GodotWebXR = {
 			// cases we have not enumerated. If it is not breaking anything, our
 			// inclination is to leave it alone.
 
-			let new_view_count = 2;
+			let new_view_count;
 			if (GodotWebXR.pose) {
 				new_view_count = GodotWebXR.pose.views.length;
-			} else if (GodotWebXR.session_mode === 'inline') {
-				// XRSession does not expose its mode; use the string this module
-				// was initialized with. Only immersive sessions are stereo.
+			} else if (GodotWebXR.gpu_binding && GodotWebXR.session_mode === 'immersive-vr') {
+				// WebGPU immersive-vr only: stereo by definition, so build the
+				// texture-array layer up front. (XRSession does not expose its
+				// mode; use the string this module was initialized with.)
+				// Other modes (inline, immersive-ar) keep the upstream 1-view
+				// default: handheld AR really is 1 view, and guessing 2 would
+				// reintroduce the destroy/rebuild this branch exists to avoid.
+				// An HMD AR session on WebGPU still pays one rebuild on its
+				// first pose; the warn below will note it.
+				new_view_count = 2;
+			} else {
+				// Upstream behaviour (WebGL path unchanged): assume 1 view
+				// until a pose proves otherwise.
 				new_view_count = 1;
 			}
 			let layer = GodotWebXR.layer;
@@ -134,8 +145,8 @@ const GodotWebXR = {
 			// swaps the layer out from under the compositor mid-session, which the
 			// WebXR-WebGPU spec does not define. Measured cold-cache: ~10s -> instant.
 			// Silent when healthy; shouts once if the double-create ever comes back.
-			if (layer && GodotWebXR.view_count !== new_view_count && !GodotWebXR._warned_relayer) {
-				GodotWebXR._warned_relayer = true;
+			if (layer && GodotWebXR.view_count !== new_view_count && !GodotWebXR.warned_relayer) {
+				GodotWebXR.warned_relayer = true;
 				console.warn('[webxr] REBUILDING the projection layer mid-session ('
 					+ GodotWebXR.view_count + ' -> ' + new_view_count + ' views). This is the '
 					+ '~10s startup stall and is undefined per spec. An immersive-vr session '
@@ -506,6 +517,7 @@ const GodotWebXR = {
 		GodotWebXR.pose = null;
 		GodotWebXR.view_count = 1;
 		GodotWebXR.session_mode = '';
+		GodotWebXR.warned_relayer = false;
 		GodotWebXR.input_sources = new Array(16);
 		GodotWebXR.touches = new Array(5);
 		GodotWebXR.onsimpleevent = null;

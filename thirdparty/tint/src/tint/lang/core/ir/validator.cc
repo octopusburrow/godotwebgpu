@@ -2257,31 +2257,13 @@ void Validator::CheckType(const core::type::Type* root,
 
                     cur_offset += (member->Offset() - cur_offset) + member->MinimumRequiredSize();
                 }
-                // GODOT PATCH (extends spec-constant size-mismatch relaxation): the
-                // total-size check must honor the same capability as the member-size
-                // check above — spec-constant-sized arrays leave the struct's Size()
-                // decoration at its unfolded value.
-                //
-                // NECESSITY: EMPIRICALLY CONFIRMED for the WebGPU driver, 2026-08-23.
-                // A build was shipped by accident with this patch reverted (an aborted
-                // no-patch build left a stale validator object that got linked in).
-                // Result: BLACK SCREEN — shader validation failed and nothing drew, on
-                // a simple scene (one light, StandardMaterial3D). Tint is invoked from
-                // exactly one place (drivers/webgpu/tint_wrapper.cpp), so this concerns
-                // every shader the WebGPU driver ingests; without it the WebGPU path
-                // does not render at all.
-                //
-                // Whether it is also required on other paths is UNTESTED. And this may be
-                // the WRONG LAYER: the alternative is fixing Godot's shader generation so
-                // it stops emitting a struct whose declared size disagrees with its
-                // members, which would touch no vendored code. Not investigated.
-                //
-                // CAUTION on the reasoning: the member-size check this mirrors sits inside
-                // `if (!member->RowMajor())` carrying `TODO(448608979): Remove guard once
-                // updated to handle RowMajor correctly` — i.e. that capability lives in a
-                // known-temporary workaround with an upstream tracking number, not a stable
-                // design principle. This patch works and is required; the argument that it
-                // is *correct* is weaker than the evidence that it is *necessary*.
+                // GODOT PATCH (patches/0007, extends patches/0002): the total-size
+                // check must honor kAllowStructMemberSizeMismatch like the
+                // member-size check above — spec-constant-sized arrays leave the
+                // struct's Size() decoration at its unfolded value. Empirically
+                // required for the WebGPU driver (a build without it renders
+                // nothing); rationale and caveats in thirdparty/tint/patches/README.md
+                // and the introducing commit.
                 if (!capabilities_.Contains(Capability::kAllowStructMemberSizeMismatch) &&
                     str->Size() < cur_offset) {
                     diag() << "struct size (" << str->Size()

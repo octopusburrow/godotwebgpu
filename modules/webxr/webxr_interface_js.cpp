@@ -291,15 +291,14 @@ uint32_t WebXRInterfaceJS::get_capabilities() const {
 uint32_t WebXRInterfaceJS::get_view_count() {
 	uint32_t view_count = godot_webxr_get_view_count();
 
-	// Godot's RenderingDevice renderer implements stereo exclusively via
-	// multiview (rendering_device.cpp:2804 hard-fails a multi-view render pass
-	// without driver support), and WebGPU exposes no multiview extension. Until
-	// a non-multiview stereo path exists in the RD renderer, clamp to a single
-	// view: the session is head-tracked and correctly posed, but monoscopic.
-	// Without multiview each eye is drawn as its own single-view pass (see
-	// needs_per_view_passes), so the engine builds single-view framebuffers
-	// against one array layer at a time. The projection layer itself stays a
-	// texture array — the compositor requires both views each frame.
+	// Godot's RenderingDevice renderer implements multi-view render passes
+	// exclusively via multiview (rendering_device.cpp:2804 hard-fails without
+	// driver support), and WebGPU exposes no multiview extension. Clamp to a
+	// single view so the engine configures single-view render buffers; stereo
+	// is still delivered — each eye is drawn as its own single-view pass (see
+	// needs_per_view_passes) against one array layer at a time. The projection
+	// layer itself stays a texture array; the compositor gets both views each
+	// frame.
 	RenderingDevice *rd = RenderingServer::get_singleton()->get_rendering_device();
 	if (view_count > 1 && rd != nullptr && !rd->has_feature(RenderingDevice::SUPPORTS_MULTIVIEW)) {
 		return 1;
@@ -397,20 +396,6 @@ void WebXRInterfaceJS::uninitialize() {
 
 		godot_webxr_uninitialize();
 
-#ifdef WEBGPU_ENABLED
-		// The imported WGPUTexture handles are owned by this module (the JS-side
-		// import creates them with one reference); collect them before the RID
-		// teardown clears the cache, and drop that reference afterwards. Without
-		// this, every enter/exit VR cycle leaks the import handles and pins the
-		// JS GPUTexture objects.
-		LocalVector<WGPUTexture> imported;
-		if (RenderingServer::get_singleton()->get_rendering_device() != nullptr) {
-			for (const KeyValue<unsigned int, RID> &E : texture_cache) {
-				imported.push_back((WGPUTexture)(uintptr_t)E.key);
-			}
-		}
-#endif // WEBGPU_ENABLED
-
 		// RenderingDevice (WebGPU) path: view slices are shared views of the
 		// cached parents and must be freed BEFORE them — freeing only the
 		// parents here would leave view_slice_cache holding dead RIDs across the
@@ -421,9 +406,18 @@ void WebXRInterfaceJS::uninitialize() {
 		_release_view_slices();
 
 #ifdef WEBGPU_ENABLED
-		for (const WGPUTexture &tex : imported) {
-			wgpuTextureRelease(tex);
+		// Drop this module's owning reference on every WGPUTexture imported
+		// this session (the JS-side import creates each with one reference).
+		// The session-lifetime list — NOT the per-frame texture_cache, which
+		// only holds the last frame's textures and is empty if the session
+		// ended pose-less (headset taken off) — otherwise each enter/exit VR
+		// cycle would leak the import handles and pin the JS GPUTexture
+		// objects. The JS import cache is keyed on the session, so the next
+		// session re-imports rather than reusing a released pointer.
+		for (const uint64_t handle : imported_texture_handles) {
+			wgpuTextureRelease((WGPUTexture)(uintptr_t)handle);
 		}
+		imported_texture_handles.clear();
 #endif // WEBGPU_ENABLED
 #ifdef GLES3_ENABLED
 		GLES3::TextureStorage *texture_storage = GLES3::TextureStorage::get_singleton();
@@ -681,7 +675,8 @@ RID WebXRInterfaceJS::_get_texture(unsigned int p_texture_id) {
 		// ownership of the underlying XR-compositor resource.
 		//
 		// The projection layer is allocated with getPreferredColorFormat() —
-		// bgra8unorm on desktop Chrome, typically rgba8unorm on Android — so the
+		// observed bgra8unorm on desktop Chrome, typically rgba8unorm on
+		// Android — so the
 		// declared RD format must be read from the texture, not assumed. Render
 		// pipelines take their color-target format from this declared format
 		// (the driver's attachment-view format is already read from the texture
@@ -718,6 +713,9 @@ RID WebXRInterfaceJS::_get_texture(unsigned int p_texture_id) {
 				texture_layers,
 				1);
 		texture_cache.insert(p_texture_id, texture);
+		if (!imported_texture_handles.has((uint64_t)p_texture_id)) {
+			imported_texture_handles.push_back((uint64_t)p_texture_id);
+		}
 		return texture;
 #else
 		return RID();
@@ -778,8 +776,6 @@ void WebXRInterfaceJS::_release_view_slices() {
 			view_slice_cache[i] = RID();
 		}
 	}
-	view_slice_source = RID();
-
 	for (const KeyValue<unsigned int, RID> &E : texture_cache) {
 		if (E.value.is_valid()) {
 			rd->free_rid(E.value);
@@ -802,7 +798,6 @@ RID WebXRInterfaceJS::get_color_texture_for_view(uint32_t p_view) {
 	if (source.is_null()) {
 		return RID();
 	}
-	view_slice_source = source;
 
 	if (view_slice_cache[p_view].is_null()) {
 		// A renderable WebGPU view must cover exactly one array layer.

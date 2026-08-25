@@ -63,14 +63,12 @@
 static void _timestamp_readback_callback(WGPUMapAsyncStatus p_status, WGPUStringView p_message, void *p_userdata1, void *p_userdata2);
 
 // Fence work-done callback: fires when wgpuQueueSubmit work completes on GPU.
-// Dawn API change: emsdk >= 4.0.10 passes a WGPUStringView message as the 2nd
-// parameter (4 params total). Older Dawn used 3. Detect via the emdawnwebgpu
-// port's own version guard so this builds on both.
-#if defined(WGPU_STRLEN) || defined(WGPU_STRING_VIEW_INIT)
-static void _fence_work_done_callback(WGPUQueueWorkDoneStatus p_status, WGPUStringView, void *p_userdata1, void *p_userdata2) {
-#else
-static void _fence_work_done_callback(WGPUQueueWorkDoneStatus p_status, void *p_userdata1, void *p_userdata2) {
-#endif
+// Newer emdawnwebgpu packages add a WGPUStringView message parameter to
+// WGPUQueueWorkDoneCallback (4 params); earlier ones have 3. Macro presence
+// does NOT discriminate the two (both define WGPU_STRLEN), so provide both
+// signatures as overloads and let the assignment to the port's own
+// WGPUQueueWorkDoneCallback typedef select the matching one.
+static void _fence_work_done_body(void *p_userdata1) {
 	WGFence *fence = (WGFence *)p_userdata1;
 	if (!fence) {
 		return;
@@ -86,6 +84,16 @@ static void _fence_work_done_callback(WGPUQueueWorkDoneStatus p_status, void *p_
 
 	fence->signaled = true;
 }
+
+[[maybe_unused]] static void _fence_work_done_callback(WGPUQueueWorkDoneStatus p_status, void *p_userdata1, void *p_userdata2) {
+	_fence_work_done_body(p_userdata1);
+}
+
+#if defined(WGPU_STRING_VIEW_INIT)
+[[maybe_unused]] static void _fence_work_done_callback(WGPUQueueWorkDoneStatus p_status, WGPUStringView p_message, void *p_userdata1, void *p_userdata2) {
+	_fence_work_done_body(p_userdata1);
+}
+#endif
 
 // Parse "@group(G[u]) @binding(B[u])" from a WGSL string.
 // Handles the optional 'u'/'i' suffix that Tint emits for integer literals.
@@ -2498,6 +2506,8 @@ RDD::DataFormat RenderingDeviceDriverWebGPU::_wgpu_to_data_format(WGPUTextureFor
 	switch (p_format) {
 		case WGPUTextureFormat_BGRA8Unorm: return DATA_FORMAT_B8G8R8A8_UNORM;
 		case WGPUTextureFormat_RGBA8Unorm: return DATA_FORMAT_R8G8B8A8_UNORM;
+		case WGPUTextureFormat_BGRA8UnormSrgb: return DATA_FORMAT_B8G8R8A8_SRGB;
+		case WGPUTextureFormat_RGBA8UnormSrgb: return DATA_FORMAT_R8G8B8A8_SRGB;
 		default: return DATA_FORMAT_MAX;
 	}
 }
@@ -8116,6 +8126,11 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 			// Chrome ignores CompositeAlphaMode_Opaque and composites alpha=0
 			// against a gray/white background. The swap chain (BGRA8Unorm) is the
 			// only BGRA render target — internal targets use RGBA formats.
+			// TODO(webxr): no longer strictly true — WebXR projection layers are
+			// BGRA8Unorm where getPreferredColorFormat() says so (desktop Chrome),
+			// so XR pipelines also lose alpha writes. Benign for opaque VR
+			// compositing; must be re-keyed on an is-swapchain flag before
+			// supporting immersive-ar alpha-blend output.
 			// Stripping alpha for blended pipelines too ensures the clear value's
 			// alpha=1 is never overwritten by shader output.
 			if (fmt == WGPUTextureFormat_BGRA8Unorm) {

@@ -64,8 +64,12 @@ private:
 	Size2 render_targetsize;
 	RBMap<unsigned int, RID> texture_cache;
 	RID view_slice_cache[2];
-	RID view_slice_source;
 	uint32_t current_view = 0;
+	// WGPUTexture pointers imported from JS this session (owning references,
+	// released at uninitialize). Distinct handles are few (the layer's
+	// swapchain images), but the per-frame texture_cache only ever holds the
+	// LAST frame's, so session-lifetime tracking is required to release all.
+	LocalVector<uint64_t> imported_texture_handles;
 	struct Touch {
 		bool is_touching = false;
 		Vector2 position;
