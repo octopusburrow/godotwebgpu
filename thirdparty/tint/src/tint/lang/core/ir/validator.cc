@@ -2262,14 +2262,14 @@ void Validator::CheckType(const core::type::Type* root,
                 // check above — spec-constant-sized arrays leave the struct's Size()
                 // decoration at its unfolded value.
                 //
-                // NECESSITY: EMPIRICALLY CONFIRMED for WebGPU, 2026-08-23. A build was
-                // shipped by accident with this patch reverted (an aborted no-patch build
-                // left a stale validator object that got linked in). Result: BLACK SCREEN
-                // — shader validation failed and nothing drew, on a scene using
-                // rendering_method=gl_compatibility with one light and StandardMaterial3D.
-                // So this is not only a Mobile-renderer concern: gl_compatibility on the
-                // WebGPU backend still routes shaders through Tint, and without this the
-                // WebGPU path does not render at all.
+                // NECESSITY: EMPIRICALLY CONFIRMED for the WebGPU driver, 2026-08-23.
+                // A build was shipped by accident with this patch reverted (an aborted
+                // no-patch build left a stale validator object that got linked in).
+                // Result: BLACK SCREEN — shader validation failed and nothing drew, on
+                // a simple scene (one light, StandardMaterial3D). Tint is invoked from
+                // exactly one place (drivers/webgpu/tint_wrapper.cpp), so this concerns
+                // every shader the WebGPU driver ingests; without it the WebGPU path
+                // does not render at all.
                 //
                 // Whether it is also required on other paths is UNTESTED. And this may be
                 // the WRONG LAYER: the alternative is fixing Godot's shader generation so

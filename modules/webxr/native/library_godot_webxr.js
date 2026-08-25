@@ -44,7 +44,7 @@ const GodotWebXR = {
 		frame: null,
 		pose: null,
 		view_count: 1,
-		force_mono: false,
+		session_mode: '',
 		input_sources: new Array(16),
 		touches: new Array(5),
 		onsimpleevent: null,
@@ -90,18 +90,14 @@ const GodotWebXR = {
 		},
 
 		getLayer: () => {
-			// Use the count the engine will actually render with. Godot's RD
-			// renderer clamps to 1 view when the driver lacks multiview; creating
-			// a texture-array layer for 2 views would then mismatch the
-			// single-view framebuffer the engine builds.
-			// The layer must be created during session setup, BEFORE the first pose
-			// exists. Defaulting to 1 there built a mono layer that was then
-			// destroyed and rebuilt as a texture-array on the first real pose -
-			// swapping the layer out from under the compositor mid-session.
-			// An immersive-vr session is stereo by definition, so assume 2 until a
-			// pose proves otherwise. (Measured: the 1->2 rebuild happened on every
-			// session start.)
-			// UPSTREAM NOTE — this fallback is NOT ours. Godot's WebXR glue has long
+			// The layer is created during session setup, BEFORE the first pose
+			// exists. Defaulting to 1 view there built a mono layer that was then
+			// destroyed and rebuilt as a texture-array on the first real pose —
+			// swapping the layer out from under the compositor mid-session, at a
+			// measured cost of ~10s of session startup on WebGPU. An immersive
+			// session is stereo by definition, so assume 2 views until a pose
+			// proves otherwise.
+			// UPSTREAM NOTE — the 1-view fallback is NOT ours. Godot's WebXR glue has long
 			// used `(pose) ? pose.views.length : 1`, i.e. assume ONE view until a pose
 			// proves otherwise. On the WebGL path that is free: if the guess is wrong
 			// the layer is simply rebuilt on the first stereo pose, and GL layer
@@ -122,35 +118,14 @@ const GodotWebXR = {
 			// cases we have not enumerated. If it is not breaking anything, our
 			// inclination is to leave it alone.
 
-			// A/B SWITCH (2026-08-23, for the PR's causal claim): ?legacy_layer=1
-			// restores the pre-fix behaviour — fall back to 1 view when no pose
-			// exists yet, which forces the 1->2 destroy/rebuild on the first
-			// stereo pose. Rendering is IDENTICAL either way; only the number of
-			// layer creations differs. This is the whole delta under test.
-			let raw_view_count = 2;
-			if (GodotWebXR._legacy_layer === undefined) {
-				GodotWebXR._legacy_layer =
-					new URLSearchParams(location.search).get('legacy_layer') === '1';
-				if (GodotWebXR._legacy_layer) {
-					console.warn('[webxr][A/B] legacy_layer=1 — using the PRE-FIX path '
-						+ '(mono layer at setup, rebuilt to texture-array on first pose).');
-				}
+			let new_view_count = 2;
+			if (GodotWebXR.pose) {
+				new_view_count = GodotWebXR.pose.views.length;
+			} else if (GodotWebXR.session_mode === 'inline') {
+				// XRSession does not expose its mode; use the string this module
+				// was initialized with. Only immersive sessions are stereo.
+				new_view_count = 1;
 			}
-			if (GodotWebXR._legacy_layer && !GodotWebXR.pose) {
-				raw_view_count = 1;                       // the old bug, on purpose
-			} else if (GodotWebXR.pose) {
-				raw_view_count = GodotWebXR.pose.views.length;
-			} else if (GodotWebXR.session && GodotWebXR.session.mode === 'inline') {
-				raw_view_count = 1;
-			}
-			// Ask the engine (not a previously-pushed flag) so the very first
-			// layer is created with the right textureType — the layer is built
-			// during session setup, before any per-frame engine call runs.
-			let mono = GodotWebXR.force_mono;
-			if (!mono && GodotWebXR.engine_supports_multiview !== undefined) {
-				mono = !GodotWebXR.engine_supports_multiview;
-			}
-			const new_view_count = mono ? 1 : raw_view_count;
 			let layer = GodotWebXR.layer;
 
 			// 2026-08-23: creating the projection layer a SECOND time (destroy +
@@ -172,14 +147,6 @@ const GodotWebXR = {
 			if (layer && GodotWebXR.view_count === new_view_count) {
 				return layer;
 			}
-
-			// Timestamped layer-creation trace: this is the measurement the A/B
-			// exists to produce. t = ms since session setup began.
-			GodotWebXR._t0 = GodotWebXR._t0 || performance.now();
-			GodotWebXR._layer_n = (GodotWebXR._layer_n || 0) + 1;
-			console.log('[webxr][A/B] creating projection layer #' + GodotWebXR._layer_n
-				+ ' views=' + new_view_count
-				+ ' t=+' + (performance.now() - GodotWebXR._t0).toFixed(0) + 'ms');
 
 			if (GodotWebXR.gpu_binding) {
 				// WebGPU projection layer. Note: no depthStencilFormat — a layer
@@ -229,17 +196,7 @@ const GodotWebXR = {
 			// geometry must pass the view index.
 			const view = GodotWebXR.pose.views[p_view || 0] || GodotWebXR.pose.views[0];
 			if (GodotWebXR.gpu_binding) {
-				const sub = GodotWebXR.gpu_binding.getViewSubImage(layer, view);
-				if (!GodotWebXR.__loggedLayout) {
-					GodotWebXR.__loggedLayout = true;
-					const views = GodotWebXR.pose.views;
-					const desc = views.map((v, i) => {
-						const si = GodotWebXR.gpu_binding.getViewSubImage(layer, v);
-						const vp = si.viewport;
-						return `view${i}: vp=${vp.x},${vp.y} ${vp.width}x${vp.height} imageIndex=${si.imageIndex} tex=${si.colorTexture.width}x${si.colorTexture.height}x${si.colorTexture.depthOrArrayLayers}`;
-					}).join(' | ');
-				}
-				return sub;
+				return GodotWebXR.gpu_binding.getViewSubImage(layer, view);
 			}
 			return GodotWebXR.gl_binding.getViewSubImage(layer, view);
 		},
@@ -248,9 +205,13 @@ const GodotWebXR = {
 			if (GodotWebXR.gpu_binding) {
 				// WebGPU: import the opaque GPUTexture into emdawnwebgpu and hand
 				// the resulting WGPUTexture pointer to C++. Cached on the JS
-				// object — opaque texture object identity is stable per spec.
-				if (texture.__godotPtr === undefined) {
+				// object — opaque texture object identity is stable per spec
+				// WITHIN a session. C++ releases the import handles at session
+				// end, so a cached pointer from a previous session is dangling;
+				// key the cache on the session to force a re-import.
+				if (texture.__godotPtr === undefined || texture.__godotSession !== GodotWebXR.session) {
 					texture.__godotPtr = WebGPU.importJsTexture(texture);
+					texture.__godotSession = GodotWebXR.session;
 				}
 				return texture.__godotPtr;
 			}
@@ -365,6 +326,7 @@ const GodotWebXR = {
 		GodotWebXR.monkeyPatchRequestAnimationFrame(true);
 
 		const session_mode = GodotRuntime.parseString(p_session_mode);
+		GodotWebXR.session_mode = session_mode;
 		const required_features = GodotRuntime.parseString(p_required_features).split(',').map((s) => s.trim()).filter((s) => s !== '');
 		const optional_features = GodotRuntime.parseString(p_optional_features).split(',').map((s) => s.trim()).filter((s) => s !== '');
 		const requested_reference_space_types = GodotRuntime.parseString(p_requested_reference_spaces).split(',').map((s) => s.trim());
@@ -543,6 +505,7 @@ const GodotWebXR = {
 		GodotWebXR.frame = null;
 		GodotWebXR.pose = null;
 		GodotWebXR.view_count = 1;
+		GodotWebXR.session_mode = '';
 		GodotWebXR.input_sources = new Array(16);
 		GodotWebXR.touches = new Array(5);
 		GodotWebXR.onsimpleevent = null;
@@ -563,18 +526,6 @@ const GodotWebXR = {
 		return view_count > 0 ? view_count : 1;
 	},
 
-	godot_webxr_set_force_mono__proxy: 'sync',
-	godot_webxr_set_force_mono__sig: 'vi',
-	godot_webxr_set_force_mono: function (p_force) {
-		const force = !!p_force;
-		if (GodotWebXR.force_mono !== force) {
-			GodotWebXR.force_mono = force;
-			// Drop the cached layer so it is recreated with the right textureType.
-			GodotWebXR.layer = null;
-			GodotWebXR.view_count = 0;
-		}
-	},
-
 	godot_webxr_get_texture_layers__proxy: 'sync',
 	godot_webxr_get_texture_layers__sig: 'i',
 	godot_webxr_get_texture_layers: function () {
@@ -584,20 +535,6 @@ const GodotWebXR = {
 		}
 		// Authoritative: the compositor's own texture, not a pose-derived guess.
 		return subimage.colorTexture.depthOrArrayLayers || 1;
-	},
-
-	godot_webxr_get_view_viewport__proxy: 'sync',
-	godot_webxr_get_view_viewport__sig: 'iii',
-	godot_webxr_get_view_viewport: function (p_view, r_rect) {
-		const subimage = GodotWebXR.getSubImage(p_view);
-		if (subimage === null) {
-			return false;
-		}
-		GodotRuntime.setHeapValue(r_rect + 0, subimage.viewport.x, 'i32');
-		GodotRuntime.setHeapValue(r_rect + 4, subimage.viewport.y, 'i32');
-		GodotRuntime.setHeapValue(r_rect + 8, subimage.viewport.width, 'i32');
-		GodotRuntime.setHeapValue(r_rect + 12, subimage.viewport.height, 'i32');
-		return true;
 	},
 
 	godot_webxr_get_render_target_size__proxy: 'sync',

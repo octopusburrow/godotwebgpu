@@ -883,6 +883,13 @@ void RendererViewport::draw_viewports(bool p_swap_buffers) {
 						_draw_viewport(vp);
 					}
 					xr_interface->set_current_view(0);
+					// Restore the frame-level override set above, so the render
+					// target is not left pointing at the last view's slice.
+					RSG::texture_storage->render_target_set_override(vp->render_target,
+							xr_interface->get_color_texture(),
+							xr_interface->get_depth_texture(),
+							xr_interface->get_velocity_texture(),
+							xr_interface->get_velocity_depth_texture());
 				} else {
 					// and draw viewport
 					_draw_viewport(vp);

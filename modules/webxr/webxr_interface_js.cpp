@@ -36,6 +36,7 @@
 
 #include "core/input/input.h"
 #include "core/os/os.h"
+#include "core/templates/local_vector.h"
 #ifdef GLES3_ENABLED
 #include "drivers/gles3/storage/texture_storage.h"
 #endif
@@ -49,6 +50,13 @@
 
 #include <emscripten.h>
 #include <cstdlib>
+
+#ifdef WEBGPU_ENABLED
+// For querying the real format of (and releasing) XR-compositor textures
+// imported from JS. The emdawnwebgpu include path is on global CCFLAGS
+// (--use-port=emdawnwebgpu, platform/web/detect.py) whenever webgpu=yes.
+#include <webgpu/webgpu.h>
+#endif
 
 void _emwebxr_on_session_supported(char *p_session_mode, int p_supported) {
 	XRServer *xr_server = XRServer::get_singleton();
@@ -348,9 +356,6 @@ bool WebXRInterfaceJS::initialize() {
 
 		initialized = true;
 
-		// Tell the JS side up front whether the engine can do multiview, so the
-		// projection layer is created with a matching textureType. This must
-		// happen before the layer exists — by the first frame it is too late.
 		godot_webxr_initialize(
 				session_mode.utf8().get_data(),
 				required_features.utf8().get_data(),
@@ -392,12 +397,34 @@ void WebXRInterfaceJS::uninitialize() {
 
 		godot_webxr_uninitialize();
 
-		RenderingDevice *rd = RenderingServer::get_singleton()->get_rendering_device();
-		if (rd != nullptr) {
-			for (KeyValue<unsigned int, RID> &E : texture_cache) {
-				rd->free_rid(E.value);
+#ifdef WEBGPU_ENABLED
+		// The imported WGPUTexture handles are owned by this module (the JS-side
+		// import creates them with one reference); collect them before the RID
+		// teardown clears the cache, and drop that reference afterwards. Without
+		// this, every enter/exit VR cycle leaks the import handles and pins the
+		// JS GPUTexture objects.
+		LocalVector<WGPUTexture> imported;
+		if (RenderingServer::get_singleton()->get_rendering_device() != nullptr) {
+			for (const KeyValue<unsigned int, RID> &E : texture_cache) {
+				imported.push_back((WGPUTexture)(uintptr_t)E.key);
 			}
 		}
+#endif // WEBGPU_ENABLED
+
+		// RenderingDevice (WebGPU) path: view slices are shared views of the
+		// cached parents and must be freed BEFORE them — freeing only the
+		// parents here would leave view_slice_cache holding dead RIDs across the
+		// session boundary, and the next session's first pre_draw_viewport would
+		// free stale IDs ("Attempted to free invalid ID"). _release_view_slices()
+		// owns that ordering (slices, then parents) and clears the caches; it is
+		// a no-op without a RenderingDevice.
+		_release_view_slices();
+
+#ifdef WEBGPU_ENABLED
+		for (const WGPUTexture &tex : imported) {
+			wgpuTextureRelease(tex);
+		}
+#endif // WEBGPU_ENABLED
 #ifdef GLES3_ENABLED
 		GLES3::TextureStorage *texture_storage = GLES3::TextureStorage::get_singleton();
 		if (texture_storage != nullptr) {
@@ -648,12 +675,40 @@ RID WebXRInterfaceJS::_get_texture(unsigned int p_texture_id) {
 
 	RenderingDevice *rd = RenderingServer::get_singleton()->get_rendering_device();
 	if (rd != nullptr) {
+#ifdef WEBGPU_ENABLED
 		// WebGPU path: p_texture_id is a WGPUTexture pointer imported from JS
 		// (WebGPU.importJsTexture). The driver wraps it without taking
 		// ownership of the underlying XR-compositor resource.
+		//
+		// The projection layer is allocated with getPreferredColorFormat() —
+		// bgra8unorm on desktop Chrome, typically rgba8unorm on Android — so the
+		// declared RD format must be read from the texture, not assumed. Render
+		// pipelines take their color-target format from this declared format
+		// (the driver's attachment-view format is already read from the texture
+		// itself); declaring the wrong one makes every draw fail validation.
+		RenderingDevice::DataFormat rd_format;
+		switch (wgpuTextureGetFormat((WGPUTexture)(uintptr_t)p_texture_id)) {
+			case WGPUTextureFormat_BGRA8Unorm:
+				rd_format = RenderingDevice::DATA_FORMAT_B8G8R8A8_UNORM;
+				break;
+			case WGPUTextureFormat_RGBA8Unorm:
+				rd_format = RenderingDevice::DATA_FORMAT_R8G8B8A8_UNORM;
+				break;
+			case WGPUTextureFormat_BGRA8UnormSrgb:
+				rd_format = RenderingDevice::DATA_FORMAT_B8G8R8A8_SRGB;
+				break;
+			case WGPUTextureFormat_RGBA8UnormSrgb:
+				rd_format = RenderingDevice::DATA_FORMAT_R8G8B8A8_SRGB;
+				break;
+			default:
+				WARN_PRINT_ONCE("WebXR: projection layer texture has an unexpected format; assuming BGRA8Unorm.");
+				rd_format = RenderingDevice::DATA_FORMAT_B8G8R8A8_UNORM;
+				break;
+		}
+
 		RID texture = rd->texture_create_from_extension(
 				texture_layers == 1 ? RenderingDevice::TEXTURE_TYPE_2D : RenderingDevice::TEXTURE_TYPE_2D_ARRAY,
-				RenderingDevice::DATA_FORMAT_B8G8R8A8_UNORM,
+				rd_format,
 				RenderingDevice::TEXTURE_SAMPLES_1,
 				RenderingDevice::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT,
 				(uint64_t)p_texture_id,
@@ -664,6 +719,9 @@ RID WebXRInterfaceJS::_get_texture(unsigned int p_texture_id) {
 				1);
 		texture_cache.insert(p_texture_id, texture);
 		return texture;
+#else
+		return RID();
+#endif // WEBGPU_ENABLED
 	}
 
 #ifdef GLES3_ENABLED
