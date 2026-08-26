@@ -875,6 +875,16 @@ void RendererViewport::draw_viewports(bool p_swap_buffers) {
 					const uint32_t xr_view_count = xr_interface->get_per_view_pass_count();
 					for (uint32_t v = 0; v < xr_view_count; v++) {
 						xr_interface->set_current_view(v);
+						// Directional-shadow updates only run on the first view
+						// pass; repeat passes reuse the first pass's shadow atlas
+						// verbatim (cascades are fit to the first view's frustum —
+						// see set_xr_repeat_view_pass()).
+						// INVARIANT: this flag must bracket exactly the repeated
+						// _draw_viewport calls for THIS viewport's extra views —
+						// nothing else (other viewports, probes, sub-viewports)
+						// may reach _render_scene while it is set. It is cleared
+						// unconditionally right after the loop.
+						RSG::scene->set_xr_repeat_view_pass(v > 0);
 						RSG::texture_storage->render_target_set_override(vp->render_target,
 								xr_interface->get_color_texture_for_view(v),
 								xr_interface->get_depth_texture_for_view(v),
@@ -882,6 +892,7 @@ void RendererViewport::draw_viewports(bool p_swap_buffers) {
 								RID());
 						_draw_viewport(vp);
 					}
+					RSG::scene->set_xr_repeat_view_pass(false);
 					xr_interface->set_current_view(0);
 					// Restore the frame-level override set above, so the render
 					// target is not left pointing at the last view's slice.
