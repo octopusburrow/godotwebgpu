@@ -66,7 +66,17 @@ body {
 	image-rendering: pixelated;
 }
 
-#status-progress, #status-notice {
+#status-progress, #status-phase {
+	color: #b0b0b0;
+	font-family: 'Noto Sans', 'Droid Sans', Arial, sans-serif;
+	font-size: 0.85em;
+	line-height: 1.4em;
+	margin-top: 0.5em;
+	text-align: center;
+	display: none;
+}
+
+#status-notice {
 	display: none;
 }
 
@@ -104,6 +114,7 @@ body {
 		<div id="status">
 			<img id="status-splash" class="$GODOT_SPLASH_CLASSES" src="$GODOT_SPLASH" alt="">
 			<progress id="status-progress"></progress>
+			<div id="status-phase"></div>
 			<div id="status-notice"></div>
 		</div>
 
@@ -289,7 +300,10 @@ async function initWebGPU() {
 			} else {
 				// No WebGPU device — the engine will fall back to gl_compatibility
 				// if opengl3=yes was also compiled in. Otherwise it will fail at init.
+				// Correct the config so downstream consumers (boot-phase reporting,
+				// diagnostics) see the driver that will actually run.
 				console.warn('WebGPU unavailable, engine will attempt fallback.');
+				engineConfig['renderingDriver'] = 'opengl3';
 			}
 
 			const engine = new Engine(engineConfig);
@@ -302,6 +316,17 @@ async function initWebGPU() {
 						statusProgress.removeAttribute('value');
 						statusProgress.removeAttribute('max');
 					}
+				},
+				// Reported after the download finishes, just before the engine's
+				// synchronous start-up blocks the main thread. Swap the full
+				// progress bar for a legible phase message so the loading screen
+				// does not look frozen while shaders/pipelines compile.
+				'onStatusChange': function (phase) {
+					// A quiet line under the (full) progress bar — enough to say the
+					// silence is expected, without an alarming notice box.
+					const el = document.getElementById('status-phase');
+					el.textContent = phase === 'shader-compile' ? 'Compiling shaders…' : 'Initializing engine…';
+					el.style.display = 'block';
 				},
 			}).then(() => {
 				setStatusMode('hidden');
