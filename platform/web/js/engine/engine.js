@@ -197,10 +197,16 @@ const Engine = (function () {
 								: 'engine-init';
 							me.config.onStatusChange(phase);
 							// Yield to the browser so the message actually paints before
-							// `callMain` blocks the thread. A double rAF waits for a real
-							// composite — but rAF is suspended entirely in background
-							// tabs, so race it against a short timeout (run-once latch)
-							// or a backgrounded page would not boot until focused.
+							// `callMain` blocks the thread. A double rAF is NOT a
+							// composite guarantee: measured under post-download load
+							// (CDP screencast), the two rAF callbacks fired 2-8ms apart
+							// with no frame between them, and the message never reached
+							// a single compositor frame. Instead, align to a frame
+							// boundary with one rAF, then give the compositor real time
+							// to present the committed change before blocking. rAF is
+							// suspended entirely in background tabs, so keep an absolute
+							// fallback timer (run-once latch) or a backgrounded page
+							// would not boot until focused.
 							let mainStarted = false;
 							const runMainOnce = function () {
 								if (!mainStarted) {
@@ -210,10 +216,10 @@ const Engine = (function () {
 							};
 							if (typeof requestAnimationFrame === 'function') {
 								requestAnimationFrame(function () {
-									requestAnimationFrame(runMainOnce);
+									setTimeout(runMainOnce, 100);
 								});
 							}
-							setTimeout(runMainOnce, 250);
+							setTimeout(runMainOnce, 1000);
 						} else {
 							runMain();
 						}
