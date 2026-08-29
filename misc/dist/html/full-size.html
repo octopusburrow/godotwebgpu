@@ -86,6 +86,16 @@ body {
 	margin: 0 auto;
 }
 
+#status-phase {
+	/* Positioned like the bar itself: the absolutely-positioned splash paints
+	   above normal-flow content, so an unpositioned phase line renders
+	   underneath it (measured: elementFromPoint at the text hit the splash). */
+	position: absolute;
+	left: 0;
+	right: 0;
+	bottom: calc(10% - 2.2em);
+}
+
 #status-notice {
 	background-color: #5b3943;
 	border-radius: 0.5rem;
